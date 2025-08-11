@@ -1,0 +1,203 @@
+<#
+.SYNOPSIS
+    Personal Admin Toolkit - Menu driven with verbose output and reliable pause.
+.DESCRIPTION
+    Script with remediations and tweaks:
+    1) CVE-2013-3900 fix
+    2) Set desktop background to solid black + enable dark theme + remove search and task view buttons
+    3) Set Windows visual effects to best performance
+    Includes a reliable pause after each action.
+#>
+
+function Pause-ForUser {
+    Write-Host
+    Read-Host -Prompt "Press Enter to return to menu"
+}
+
+function Remediate-CVE2013-3900 {
+    Write-Host "`n=== Starting CVE-2013-3900 Remediation ===`n" -ForegroundColor Cyan
+
+    $RegPathParent = "HKLM:\Software\Microsoft\Cryptography\Wintrust"
+    $RegPath = "$RegPathParent\Config"
+    $RegName = "EnableCertPaddingCheck"
+    $DesiredValue = 1
+    $Changed = $false
+
+    if (-not (Test-Path $RegPathParent)) {
+        Write-Host "Parent path missing: $RegPathParent" -ForegroundColor Yellow
+        Write-Host "→ Creating $RegPathParent" -ForegroundColor Yellow
+        New-Item -Path $RegPathParent -Force | Out-Null
+    } else {
+        Write-Host "Parent path exists: $RegPathParent" -ForegroundColor Green
+    }
+
+    if (-not (Test-Path $RegPath)) {
+        Write-Host "Config path missing: $RegPath" -ForegroundColor Yellow
+        Write-Host "→ Creating $RegPath" -ForegroundColor Yellow
+        New-Item -Path $RegPath -Force | Out-Null
+    } else {
+        Write-Host "Config path exists: $RegPath" -ForegroundColor Green
+    }
+
+    try {
+        $CurrentValue = (Get-ItemProperty -Path $RegPath -Name $RegName -ErrorAction Stop).$RegName
+        Write-Host "Current value of $RegName is: $CurrentValue" -ForegroundColor Cyan
+
+        if ($CurrentValue -ne $DesiredValue) {
+            Write-Host "→ Updating value from $CurrentValue to $DesiredValue" -ForegroundColor Yellow
+            Set-ItemProperty -Path $RegPath -Name $RegName -Type DWord -Value $DesiredValue
+            $Changed = $true
+        } else {
+            Write-Host "Value is already correct ($DesiredValue)" -ForegroundColor Green
+        }
+    }
+    catch {
+        Write-Host "Value $RegName not found under $RegPath" -ForegroundColor Yellow
+        Write-Host "→ Creating $RegName and setting to $DesiredValue" -ForegroundColor Yellow
+        New-ItemProperty -Path $RegPath -Name $RegName -PropertyType DWord -Value $DesiredValue -Force | Out-Null
+        $Changed = $true
+    }
+
+    $VerifyValue = (Get-ItemProperty -Path $RegPath -Name $RegName).$RegName
+    if ($VerifyValue -eq $DesiredValue) {
+        if ($Changed) {
+            Write-Host "SUCCESS: Setting applied. Reboot recommended." -ForegroundColor Green
+        } else {
+            Write-Host "System was already compliant." -ForegroundColor Green
+        }
+        Write-Host "Registry location: HKLM\Software\Microsoft\Cryptography\Wintrust\Config\$RegName = $VerifyValue" -ForegroundColor Cyan
+    } else {
+        Write-Host "ERROR: Failed to set $RegName. Please check permissions." -ForegroundColor Red
+        return 1
+    }
+
+    Write-Host "`n=== CVE-2013-3900 remediation complete ===`n" -ForegroundColor Cyan
+}
+
+function Set-BackgroundSolidBlack {
+    Write-Host "`n=== Setting Desktop Background to Solid Black and Enabling Dark Theme + Remove Taskbar Search and Task View ===`n" -ForegroundColor Cyan
+
+    try {
+        # Set desktop background color to black
+        $wallpaperRegPath = "HKCU:\Control Panel\Colors"
+        Set-ItemProperty -Path $wallpaperRegPath -Name "Background" -Value "0 0 0"
+
+        $wallpaperRegPath2 = "HKCU:\Control Panel\Desktop"
+        Set-ItemProperty -Path $wallpaperRegPath2 -Name "Wallpaper" -Value ""
+        Set-ItemProperty -Path $wallpaperRegPath2 -Name "WallpaperStyle" -Value "0"
+        Set-ItemProperty -Path $wallpaperRegPath2 -Name "TileWallpaper" -Value "0"
+
+        # Enable dark theme for apps and system
+        $themeRegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+        if (-not (Test-Path $themeRegPath)) {
+            Write-Host "Creating registry path for theme personalization: $themeRegPath" -ForegroundColor Yellow
+            New-Item -Path $themeRegPath -Force | Out-Null
+        } else {
+            Write-Host "Theme personalization registry path exists: $themeRegPath" -ForegroundColor Green
+        }
+
+        Set-ItemProperty -Path $themeRegPath -Name "AppsUseLightTheme" -Value 0 -Type DWord
+        Set-ItemProperty -Path $themeRegPath -Name "SystemUsesLightTheme" -Value 0 -Type DWord
+
+        # Remove Taskbar Search box
+        $searchRegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search"
+        if (-not (Test-Path $searchRegPath)) {
+            Write-Host "Creating registry path for Search settings: $searchRegPath" -ForegroundColor Yellow
+            New-Item -Path $searchRegPath -Force | Out-Null
+        } else {
+            Write-Host "Search settings registry path exists: $searchRegPath" -ForegroundColor Green
+        }
+
+        Set-ItemProperty -Path $searchRegPath -Name "SearchboxTaskbarMode" -Value 0 -Type DWord
+
+        # Remove Task View button
+        $taskViewRegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+        if (-not (Test-Path $taskViewRegPath)) {
+            Write-Host "Creating registry path for Explorer Advanced settings: $taskViewRegPath" -ForegroundColor Yellow
+            New-Item -Path $taskViewRegPath -Force | Out-Null
+        } else {
+            Write-Host "Explorer Advanced registry path exists: $taskViewRegPath" -ForegroundColor Green
+        }
+
+        Set-ItemProperty -Path $taskViewRegPath -Name "ShowTaskViewButton" -Value 0 -Type DWord
+
+        # Refresh desktop wallpaper
+        Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class Wallpaper {
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool SystemParametersInfo(int uAction, int uParam, string lpvParam, int fuWinIni);
+}
+"@
+
+        [Wallpaper]::SystemParametersInfo(20, 0, "", 3) | Out-Null
+
+        Write-Host "Desktop background set to solid black, dark theme enabled, and taskbar search/task view removed." -ForegroundColor Green
+    }
+    catch {
+        Write-Host "ERROR: Failed to apply desktop and taskbar settings: $_" -ForegroundColor Red
+    }
+
+    Write-Host "`n=== Background and taskbar settings change complete ===`n" -ForegroundColor Cyan
+}
+
+function Set-PerformanceBest {
+    Write-Host "`n=== Setting Windows Visual Effects to Best Performance ===`n" -ForegroundColor Cyan
+
+    try {
+        $PerfRegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects"
+        if (-not (Test-Path $PerfRegPath)) {
+            Write-Host "Creating registry path: $PerfRegPath" -ForegroundColor Yellow
+            New-Item -Path $PerfRegPath -Force | Out-Null
+        } else {
+            Write-Host "Registry path exists: $PerfRegPath" -ForegroundColor Green
+        }
+
+        Set-ItemProperty -Path $PerfRegPath -Name "VisualFXSetting" -Value 2
+        Write-Host "Set VisualFXSetting=2 (Best performance)" -ForegroundColor Green
+
+        Write-Host "Best performance visual effects settings applied." -ForegroundColor Green
+    }
+    catch {
+        Write-Host "ERROR: Failed to set performance options: $_" -ForegroundColor Red
+    }
+
+    Write-Host "`n=== Performance settings change complete ===`n" -ForegroundColor Cyan
+}
+
+function Show-Menu {
+    Clear-Host
+    Write-Host "=== Personal Admin Toolkit ===" -ForegroundColor Cyan
+    Write-Host "1) Remediate CVE-2013-3900 (MS13-098)" -ForegroundColor White
+    Write-Host "2) Set desktop background to solid black + enable dark theme + remove taskbar search and task view" -ForegroundColor White
+    Write-Host "3) Set Windows visual effects to best performance" -ForegroundColor White
+    Write-Host "4) Exit" -ForegroundColor White
+}
+
+do {
+    Show-Menu
+    $choice = Read-Host "Select an option"
+
+    switch ($choice) {
+        "1" {
+            Remediate-CVE2013-3900
+            Pause-ForUser
+        }
+        "2" {
+            Set-BackgroundSolidBlack
+            Pause-ForUser
+        }
+        "3" {
+            Set-PerformanceBest
+            Pause-ForUser
+        }
+        "4" {
+            Write-Host "Exiting..." -ForegroundColor Cyan
+        }
+        default {
+            Write-Host "Invalid selection. Please try again." -ForegroundColor Red
+            Start-Sleep -Seconds 1.5
+        }
+    }
+} until ($choice -eq "4")
