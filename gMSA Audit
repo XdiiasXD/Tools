@@ -1,0 +1,280 @@
+<#
+.SYNOPSIS
+  Inventory gMSA usage (services & scheduled tasks) across the domain.
+
+.DESCRIPTION
+  - Enumerates all Group Managed Service Accounts (gMSA)
+  - Expands PrincipalsAllowedToRetrieveManagedPassword to a target host list
+  - Queries remote computers for:
+       * Win32_Service LogOnAs = DOMAIN\gmsa$
+       * Scheduled tasks Principal.UserId = DOMAIN\gmsa$
+  - Outputs CSV + HTML report and console summary
+
+.NOTES
+  Requires: RSAT ActiveDirectory module, permission to query AD, remote WMI/WSMan access to servers.
+#>
+
+[CmdletBinding()]
+param(
+  [switch]$ScanAllComputers,                   # Scan all domain-joined computers instead of just "likely" hosts
+  [string]$OutputFolder = "$env:USERPROFILE\Desktop\gMSA-Audit"
+)
+
+#--- Helpers ---------------------------------------------------------------
+function Write-Info($msg){ Write-Host "[*] $msg" }
+function Write-Warn($msg){ Write-Warning $msg }
+function Write-Err ($msg){ Write-Host "[X] $msg" -ForegroundColor Red }
+
+function Resolve-ComputerMembers {
+  param([Parameter(Mandatory)][System.Collections.IEnumerable]$Principals)
+  $seen = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
+  $computers = New-Object System.Collections.Generic.List[string]
+
+  foreach($p in $Principals){
+    try{
+      $obj = Get-ADObject -Identity $p -Properties objectClass -ErrorAction Stop
+      switch -Regex ($obj.objectClass){
+        'computer' {
+          if($seen.Add($obj.DistinguishedName)){ 
+            $name = (Get-ADComputer -Identity $obj.DistinguishedName -Properties DNSHostName).DNSHostName
+            if([string]::IsNullOrWhiteSpace($name)){ $name = (Get-ADComputer $obj.DistinguishedName).Name }
+            $computers.Add($name)
+          }
+        }
+        'user' { # sometimes individual computer objects may resolve oddly; ignore plain users here
+          continue
+        }
+        'group' {
+          $members = Get-ADGroupMember -Identity $obj.DistinguishedName -Recursive -ErrorAction SilentlyContinue
+          if($members){
+            $computers.AddRange( (Resolve-ComputerMembers -Principals $members) )
+          }
+        }
+        default { }
+      }
+    } catch {
+      Write-Warn "Could not resolve principal $p : $($_.Exception.Message)"
+    }
+  }
+
+  # dedupe / sanitize
+  $computers | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique
+}
+
+function Try-NewCimSession {
+  param([string]$ComputerName)
+  # Try WSMan first
+  try {
+    if (Test-WSMan -ComputerName $ComputerName -ErrorAction Stop) {
+      return New-CimSession -ComputerName $ComputerName -ErrorAction Stop
+    }
+  } catch {}
+
+  # Fallback to DCOM
+  try {
+    $opts = New-CimSessionOption -Protocol Dcom
+    return New-CimSession -ComputerName $ComputerName -SessionOption $opts -ErrorAction Stop
+  } catch {
+    return $null
+  }
+}
+
+#--- Prep ------------------------------------------------------------------
+Import-Module ActiveDirectory -ErrorAction Stop
+
+# Output paths
+$null = New-Item -ItemType Directory -Path $OutputFolder -Force -ErrorAction SilentlyContinue
+$csv = Join-Path $OutputFolder "gMSA-Usage.csv"
+$html = Join-Path $OutputFolder "gMSA-Usage.html"
+
+# Domain info
+$domain = (Get-ADDomain)
+$netbios = $domain.NetBIOSName
+$dnsRoot = $domain.DNSRoot
+
+Write-Info "Domain: $($domain.DNSRoot) (NetBIOS: $netbios)"
+Write-Info "Collecting gMSA objects..."
+
+$gmsas = Get-ADServiceAccount -Filter 'ObjectClass -eq "msDS-GroupManagedServiceAccount"' -Properties *,PrincipalsAllowedToRetrieveManagedPassword 2>$null
+if(-not $gmsas){
+  Write-Info "No gMSA objects found. Creating empty report for evidence."
+  "" | Out-File $csv
+  "<h2>No gMSA objects found in domain $($domain.DNSRoot) on $(Get-Date)</h2>" | Out-File $html
+  Write-Info "CSV: $csv"
+  Write-Info "HTML: $html"
+  return
+}
+
+Write-Info ("Found {0} gMSA object(s)." -f $gmsas.Count)
+
+# Build target computer list
+$targets = @()
+if($ScanAllComputers){
+  Write-Info "Fetching ALL domain computers (ScanAllComputers = ON)..."
+  $targets = Get-ADComputer -Filter * -Properties DNSHostName | ForEach-Object {
+    if ($_.DNSHostName -and $_.DNSHostName.Trim() -ne "") {
+        $_.DNSHostName
+    } else {
+        $_.Name
+    }
+} | Sort-Object -Unique
+} else {
+  Write-Info "Deriving likely hosts from PrincipalsAllowedToRetrieveManagedPassword..."
+  $principals = @()
+  foreach($g in $gmsas){
+    $principals += $g.PrincipalsAllowedToRetrieveManagedPassword
+  }
+  $principals = $principals | Sort-Object -Unique
+  if($principals){
+    $targets = Resolve-ComputerMembers -Principals $principals
+  }
+  # Always include Domain Controllers as common gMSA consumers
+  $dcs = (Get-ADDomainController -Filter *).HostName
+  $targets = @($targets + $dcs) | Sort-Object -Unique
+}
+Write-Info ("Target computers to scan: {0}" -f ($targets.Count))
+
+# Pre-ping to trim the list
+$reachable = foreach($t in $targets){
+  if([string]::IsNullOrWhiteSpace($t)){ continue }
+  if(Test-Connection -ComputerName $t -Count 1 -Quiet -ErrorAction SilentlyContinue){ $t }
+}
+Write-Info ("Reachable computers: {0}" -f ($reachable.Count))
+
+# Data collection
+$results = New-Object System.Collections.Generic.List[object]
+
+foreach($g in $gmsas){
+  $gName = $g.Name.TrimEnd('$')
+  $sam  = $g.SamAccountName   # Typically ends with $
+  $idPattern = "(?i)^(?:$netbios\\)?$([Regex]::Escape($gName))\$$"
+
+  Write-Info "Scanning usage for gMSA: $sam ..."
+  $allowed = ($g.PrincipalsAllowedToRetrieveManagedPassword | ForEach-Object {
+    try { (Get-ADObject $_ -Properties Name).Name } catch { $_ }
+  }) -join '; '
+
+  foreach($c in $reachable){
+    $sess = Try-NewCimSession -ComputerName $c
+    if(-not $sess){
+      Write-Warn "Cannot create CIM session to $c"
+      continue
+    }
+
+    try{
+      # Services
+      $svcs = Get-CimInstance -ClassName Win32_Service -CimSession $sess -ErrorAction Stop |
+              Where-Object {
+                $_.StartName -match $idPattern
+              }
+
+      foreach($s in $svcs){
+        $results.Add([pscustomobject]@{
+          Timestamp     = (Get-Date)
+          Domain        = $dnsRoot
+          GmsaName      = $gName
+          GmsaSam       = $sam
+          AllowedPrincipals = $allowed
+          Computer      = $c
+          EvidenceType  = 'Service'
+          ServiceName   = $s.Name
+          DisplayName   = $s.DisplayName
+          LogOnAs       = $s.StartName
+          TaskPath      = $null
+          TaskName      = $null
+        })
+      }
+
+      # Scheduled Tasks (if module is present)
+      try{
+        $tasks = Get-ScheduledTask -CimSession $sess -ErrorAction Stop
+        foreach($t in $tasks){
+          $uid = $t.Principal.UserId
+          if($uid -and ($uid -match $idPattern)){
+            $results.Add([pscustomobject]@{
+              Timestamp     = (Get-Date)
+              Domain        = $dnsRoot
+              GmsaName      = $gName
+              GmsaSam       = $sam
+              AllowedPrincipals = $allowed
+              Computer      = $c
+              EvidenceType  = 'ScheduledTask'
+              ServiceName   = $null
+              DisplayName   = $null
+              LogOnAs       = $uid
+              TaskPath      = $t.TaskPath
+              TaskName      = $t.TaskName
+            })
+          }
+        }
+      } catch {
+        Write-Warn "Scheduled Tasks query failed on $c : $($_.Exception.Message)"
+      }
+
+    } catch {
+      Write-Warn "Query failed on $c : $($_.Exception.Message)"
+    } finally {
+      $sess | Remove-CimSession
+    }
+  }
+}
+
+# Write outputs
+$results | Sort-Object Computer, EvidenceType, ServiceName, TaskPath, TaskName |
+  Export-Csv -NoTypeInformation -Encoding UTF8 -Path $csv
+
+# Simple HTML summary
+$summary = @()
+$perGmsa = $results | Group-Object GmsaSam
+foreach($g in $gmsas){
+  $count = ($perGmsa | Where-Object Name -eq $g.SamAccountName).Count
+  $summary += [pscustomobject]@{ GMSA = $g.SamAccountName; InstancesFound = $count }
+}
+$summaryHtml = $summary | ConvertTo-Html -Fragment
+$tableHtml   = $results | ConvertTo-Html -Fragment
+
+@"
+<html>
+<head>
+<title>gMSA Usage Report - $dnsRoot</title>
+<meta charset='utf-8' />
+<style>
+body{font-family:Segoe UI,Arial,sans-serif;margin:20px}
+table{border-collapse:collapse;width:100%}
+th,td{border:1px solid #ddd;padding:6px}
+th{background:#f2f2f2;text-align:left}
+h1{margin-top:0}
+code{background:#f7f7f7;padding:2px 4px;border-radius:4px}
+</style>
+</head>
+<body>
+<h1>gMSA Usage Report</h1>
+<p><b>Domain:</b> $dnsRoot<br/>
+<b>Generated:</b> $(Get-Date)</p>
+
+<h2>Summary</h2>
+$summaryHtml
+
+<h2>Details</h2>
+$tableHtml
+
+<p><i>Detection logic:</i> Services/Scheduled Tasks running as <code>$netbios\gmsa$</code>.</p>
+</body>
+</html>
+"@ | Out-File -FilePath $html -Encoding UTF8
+
+Write-Host ""
+Write-Info "Done."
+Write-Info "CSV report  : $csv"
+Write-Info "HTML report : $html"
+
+# Console recap
+$tot = $results.Count
+if($tot -eq 0){
+  Write-Info "No usage detected for any gMSA on scanned hosts."
+} else {
+  $byG = $results | Group-Object GmsaSam | Select-Object Name,Count
+  Write-Host ""
+  Write-Info "Findings by gMSA:"
+  $byG | Format-Table -AutoSize
+}
