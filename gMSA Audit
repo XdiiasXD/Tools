@@ -149,6 +149,7 @@ foreach($g in $gmsas){
   $sam  = $g.SamAccountName   # Typically ends with $
   $idPattern = "(?i)^(?:{0}\)?{1}\$" -f [Regex]::Escape($netbios), [Regex]::Escape($gName)
 
+
   Write-Info "Scanning usage for gMSA: $sam ..."
   $allowed = ($g.PrincipalsAllowedToRetrieveManagedPassword | ForEach-Object {
     try { (Get-ADObject $_ -Properties Name).Name } catch { $_ }
