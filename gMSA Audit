@@ -23,7 +23,7 @@ param(
 #--- Helpers ---------------------------------------------------------------
 function Write-Info($msg){ Write-Host "[*] $msg" }
 function Write-Warn($msg){ Write-Warning $msg }
-function Write-Err ($msg){ Write-Host "[X] $msg" -ForegroundColor Red }
+function Write-Error ($msg){ Write-Host "[X] $msg" -ForegroundColor Red }
 
 function Resolve-ComputerMembers {
   param([Parameter(Mandatory)][System.Collections.IEnumerable]$Principals)
