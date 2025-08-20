@@ -4,7 +4,7 @@
 .DESCRIPTION
     Script with remediations and tweaks:
     1) CVE-2013-3900 fix
-    2) Set desktop background to solid black + enable dark theme + remove search and task view buttons
+    2) Set desktop background to solid black, enable dark theme, remove taskbar search box, and remove Task View button
     3) Set Windows visual effects to best performance
     Includes a reliable pause after each action.
 #>
