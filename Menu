@@ -6,6 +6,7 @@
     1) CVE-2013-3900 fix
     2) Set desktop background to solid black, enable dark theme, remove taskbar search box, and remove Task View button
     3) Set Windows visual effects to best performance
+    4) Run gMSA usage audit
     Includes a reliable pause after each action.
 #>
 
@@ -17,58 +18,64 @@ function Pause-ForUser {
 function Remediate-CVE2013-3900 {
     Write-Host "`n=== Starting CVE-2013-3900 Remediation ===`n" -ForegroundColor Cyan
 
-    $RegPathParent = "HKLM:\Software\Microsoft\Cryptography\Wintrust"
-    $RegPath = "$RegPathParent\Config"
+    $BasePaths = @(
+        "HKLM:\Software\Microsoft\Cryptography\Wintrust",
+        "HKLM:\Software\Wow6432Node\Microsoft\Cryptography\Wintrust"
+    )
     $RegName = "EnableCertPaddingCheck"
     $DesiredValue = 1
-    $Changed = $false
 
-    if (-not (Test-Path $RegPathParent)) {
-        Write-Host "Parent path missing: $RegPathParent" -ForegroundColor Yellow
-        Write-Host "→ Creating $RegPathParent" -ForegroundColor Yellow
-        New-Item -Path $RegPathParent -Force | Out-Null
-    } else {
-        Write-Host "Parent path exists: $RegPathParent" -ForegroundColor Green
-    }
+    foreach ($Base in $BasePaths) {
+        $RegPath = "$Base\Config"
+        $Changed = $false
 
-    if (-not (Test-Path $RegPath)) {
-        Write-Host "Config path missing: $RegPath" -ForegroundColor Yellow
-        Write-Host "→ Creating $RegPath" -ForegroundColor Yellow
-        New-Item -Path $RegPath -Force | Out-Null
-    } else {
-        Write-Host "Config path exists: $RegPath" -ForegroundColor Green
-    }
+        if (-not (Test-Path $Base)) {
+            Write-Host "Parent path missing: $Base" -ForegroundColor Yellow
+            Write-Host "→ Creating $Base" -ForegroundColor Yellow
+            New-Item -Path $Base -Force | Out-Null
+        } else {
+            Write-Host "Parent path exists: $Base" -ForegroundColor Green
+        }
 
-    try {
-        $CurrentValue = (Get-ItemProperty -Path $RegPath -Name $RegName -ErrorAction Stop).$RegName
-        Write-Host "Current value of $RegName is: $CurrentValue" -ForegroundColor Cyan
+        if (-not (Test-Path $RegPath)) {
+            Write-Host "Config path missing: $RegPath" -ForegroundColor Yellow
+            Write-Host "→ Creating $RegPath" -ForegroundColor Yellow
+            New-Item -Path $RegPath -Force | Out-Null
+        } else {
+            Write-Host "Config path exists: $RegPath" -ForegroundColor Green
+        }
 
-        if ($CurrentValue -ne $DesiredValue) {
-            Write-Host "→ Updating value from $CurrentValue to $DesiredValue" -ForegroundColor Yellow
-            Set-ItemProperty -Path $RegPath -Name $RegName -Type DWord -Value $DesiredValue
+        try {
+            $CurrentValue = (Get-ItemProperty -Path $RegPath -Name $RegName -ErrorAction Stop).$RegName
+            Write-Host "Current value of $RegName at $RegPath is: $CurrentValue" -ForegroundColor Cyan
+
+            if ($CurrentValue -ne $DesiredValue) {
+                Write-Host "→ Updating value from $CurrentValue to $DesiredValue" -ForegroundColor Yellow
+                Set-ItemProperty -Path $RegPath -Name $RegName -Type DWord -Value $DesiredValue
+                $Changed = $true
+            } else {
+                Write-Host "Value at $RegPath is already correct ($DesiredValue)" -ForegroundColor Green
+            }
+        }
+        catch {
+            Write-Host "Value $RegName not found under $RegPath" -ForegroundColor Yellow
+            Write-Host "→ Creating $RegName and setting to $DesiredValue" -ForegroundColor Yellow
+            New-ItemProperty -Path $RegPath -Name $RegName -PropertyType DWord -Value $DesiredValue -Force | Out-Null
             $Changed = $true
-        } else {
-            Write-Host "Value is already correct ($DesiredValue)" -ForegroundColor Green
         }
-    }
-    catch {
-        Write-Host "Value $RegName not found under $RegPath" -ForegroundColor Yellow
-        Write-Host "→ Creating $RegName and setting to $DesiredValue" -ForegroundColor Yellow
-        New-ItemProperty -Path $RegPath -Name $RegName -PropertyType DWord -Value $DesiredValue -Force | Out-Null
-        $Changed = $true
-    }
 
-    $VerifyValue = (Get-ItemProperty -Path $RegPath -Name $RegName).$RegName
-    if ($VerifyValue -eq $DesiredValue) {
-        if ($Changed) {
-            Write-Host "SUCCESS: Setting applied. Reboot recommended." -ForegroundColor Green
+        $VerifyValue = (Get-ItemProperty -Path $RegPath -Name $RegName).$RegName
+        if ($VerifyValue -eq $DesiredValue) {
+            if ($Changed) {
+                Write-Host "SUCCESS: Setting applied at $RegPath. Reboot recommended." -ForegroundColor Green
+            } else {
+                Write-Host "System was already compliant at $RegPath." -ForegroundColor Green
+            }
+            Write-Host "Registry location: $RegPath\$RegName = $VerifyValue" -ForegroundColor Cyan
         } else {
-            Write-Host "System was already compliant." -ForegroundColor Green
+            Write-Host "ERROR: Failed to set $RegName at $RegPath. Please check permissions." -ForegroundColor Red
+            return 1
         }
-        Write-Host "Registry location: HKLM\Software\Microsoft\Cryptography\Wintrust\Config\$RegName = $VerifyValue" -ForegroundColor Cyan
-    } else {
-        Write-Host "ERROR: Failed to set $RegName. Please check permissions." -ForegroundColor Red
-        return 1
     }
 
     Write-Host "`n=== CVE-2013-3900 remediation complete ===`n" -ForegroundColor Cyan
@@ -166,13 +173,30 @@ function Set-PerformanceBest {
     Write-Host "`n=== Performance settings change complete ===`n" -ForegroundColor Cyan
 }
 
+function Run-gMSAAudit {
+    Write-Host "`n=== Running gMSA Audit ===`n" -ForegroundColor Cyan
+    $scriptPath = Join-Path -Path $PSScriptRoot -ChildPath 'gMSA Audit'
+    if (Test-Path $scriptPath) {
+        try {
+            & $scriptPath
+        } catch {
+            Write-Host "ERROR: Failed to run gMSA Audit: $_" -ForegroundColor Red
+        }
+    } else {
+        Write-Host "gMSA Audit script not found at $scriptPath" -ForegroundColor Red
+    }
+    Write-Host "`n=== gMSA Audit complete ===`n" -ForegroundColor Cyan
+}
+
+
 function Show-Menu {
     Clear-Host
     Write-Host "=== Personal Admin Toolkit ===" -ForegroundColor Cyan
     Write-Host "1) Remediate CVE-2013-3900 (MS13-098)" -ForegroundColor White
     Write-Host "2) Set desktop background to solid black + enable dark theme + remove taskbar search and task view" -ForegroundColor White
     Write-Host "3) Set Windows visual effects to best performance" -ForegroundColor White
-    Write-Host "4) Exit" -ForegroundColor White
+    Write-Host "4) Run gMSA usage audit" -ForegroundColor White
+    Write-Host "5) Exit" -ForegroundColor White
 }
 
 do {
@@ -193,6 +217,10 @@ do {
             Pause-ForUser
         }
         "4" {
+            Run-gMSAAudit
+            Pause-ForUser
+        }
+        "5" {
             Write-Host "Exiting..." -ForegroundColor Cyan
         }
         default {
@@ -200,4 +228,4 @@ do {
             Start-Sleep -Seconds 1.5
         }
     }
-} until ($choice -eq "4")
+} until ($choice -eq "5")
